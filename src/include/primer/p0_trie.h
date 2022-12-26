@@ -73,7 +73,7 @@ class TrieNode {
    * @param key_char Key char of child node.
    * @return True if this trie node has a child with given key, false otherwise.
    */
-  bool HasChild(char key_char) const {
+  [[nodiscard]] bool HasChild(char key_char) const {
     const auto &map = this->children_;
     return map.find(key_char) != map.cend();
   }
@@ -86,7 +86,7 @@ class TrieNode {
    *
    * @return True if this trie node has any child node, false if it has no child node.
    */
-  bool HasChildren() const { return !this->children_.empty(); }
+  [[nodiscard]] bool HasChildren() const { return !this->children_.empty(); }
 
   /**
    * TODO(P0): Add implementation <done>
@@ -95,7 +95,7 @@ class TrieNode {
    *
    * @return True if is_end_ flag is true, false if is_end_ is false.
    */
-  bool IsEndNode() const { return this->is_end_; }
+  [[nodiscard]] bool IsEndNode() const { return this->is_end_; }
 
   /**
    * TODO(P0): Add implementation <done>
@@ -104,7 +104,7 @@ class TrieNode {
    *
    * @return key_char_ of this trie node.
    */
-  char GetKeyChar() const { return this->key_char_; }
+  [[nodiscard]] char GetKeyChar() const { return this->key_char_; }
 
   /**
    * TODO(P0): Add implementation <done>
@@ -127,6 +127,9 @@ class TrieNode {
    */
   std::unique_ptr<TrieNode> *InsertChildNode(char key_char, std::unique_ptr<TrieNode> &&child) {
     if (this->HasChild(key_char)) {
+      return nullptr;
+    }
+    if (key_char != child->key_char_){
       return nullptr;
     }
     this->children_[key_char] = std::move(child);
@@ -170,6 +173,15 @@ class TrieNode {
    * @param is_end Whether this trie node is ending char of a key string
    */
   void SetEndNode(bool is_end) { this->is_end_ = is_end; }
+
+  /**
+   * @brief Return a const reference to children.
+   *
+   * @return Const reference to the map of children.
+   */
+  [[nodiscard]] const std::unordered_map<char, std::unique_ptr<TrieNode>> &GetChildren() const {
+    return this->children_;
+  }
 
  protected:
   /** Key character of this trie node */
@@ -255,7 +267,7 @@ class Trie {
   /* Root node of the trie */
   std::unique_ptr<TrieNode> root_;
   /* Read-write lock for the trie */
-  ReaderWriterLatch latch_;
+  // ReaderWriterLatch latch_;
 
  public:
   /**
@@ -306,7 +318,8 @@ class Trie {
 
     char last_key = 0;
     for (auto k : key) {
-      if (root_->HasChild(k)) {
+      last_key = k;
+      if ((*node)->HasChild(k)) {
         parent = node;
         node = (*node)->GetChildNode(k);
         continue;
@@ -321,7 +334,6 @@ class Trie {
     assert(node != nullptr);
     assert(parent != nullptr);
     assert(parent != node);
-    assert(last_key != 0);
 
     if ((*node)->IsEndNode()) {
       // Encountered a TrieNodeWithValue - (3)
@@ -329,9 +341,15 @@ class Trie {
     }
 
     // Encountered a TrieNode - (1), (2). Anyways, convert it to TrieNodeWithValue
-    auto p = std::make_unique<TrieNodeWithValue>(TrieNodeWithValue((*node), value));
+    // auto q = std::unique_ptr<TrieNodeWithValue<T>>(
+    //     new TrieNodeWithValue(std::move((*(*node))), value)
+    // );
+
+    auto q = std::make_unique<TrieNodeWithValue<T>>(std::move(**node), value);
+
+    // Not last key you are supposed to remove - it's the previous key.
     (*parent)->RemoveChildNode(last_key);
-    (*parent)->InsertChildNode(last_key, std::move(p));
+    (*parent)->InsertChildNode(last_key, std::move(q));
 
     return true;
   }
@@ -454,7 +472,7 @@ class Trie {
     }
 
     // Definitely can, since it is indeed a terminal node.
-    auto p_maybe_node_with_value = dynamic_cast<TrieNodeWithValue<T> *>((**node));
+    auto p_maybe_node_with_value = dynamic_cast<TrieNodeWithValue<T> *>(node->get());
     if (p_maybe_node_with_value != nullptr) {
       return p_maybe_node_with_value->GetValue();
     }
@@ -463,5 +481,11 @@ class Trie {
         "Is the dynamic_cast problematic, "
         "or our setting has problem? ");
   }
+
+  /**
+   * @brief Return the const reference to the root.
+   * @return Return the const reference to the root.
+   */
+  [[nodiscard]] const std::unique_ptr<TrieNode> &GetRoot() const { return this->root_; }
 };
 }  // namespace bustub
