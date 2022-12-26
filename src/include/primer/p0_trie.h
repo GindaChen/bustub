@@ -54,8 +54,9 @@ class TrieNode {
     this->is_end_ = other_trie_node.is_end_;
     this->key_char_ = other_trie_node.key_char_;
     // Assign unique pointer, then remove the old elements.
-    auto &a = this->children_;
-    auto &b = other_trie_node.children_;
+    // Note(P0): What a mistake - that I confused the order of (a, b)...
+    auto &a = other_trie_node.children_;
+    auto &b = this->children_;
     b.insert(std::make_move_iterator(a.begin()), std::make_move_iterator(a.end()));
     a.erase(a.begin(), a.end());
   }
@@ -129,7 +130,7 @@ class TrieNode {
     if (this->HasChild(key_char)) {
       return nullptr;
     }
-    if (key_char != child->key_char_){
+    if (key_char != child->key_char_) {
       return nullptr;
     }
     this->children_[key_char] = std::move(child);
@@ -267,7 +268,7 @@ class Trie {
   /* Root node of the trie */
   std::unique_ptr<TrieNode> root_;
   /* Read-write lock for the trie */
-  // ReaderWriterLatch latch_;
+  ReaderWriterLatch latch_;
 
  public:
   /**
@@ -281,38 +282,12 @@ class Trie {
     //    root_ = std::unique_ptr(new TrieNode('\0')); // Strangely, template deduction did not trigger...
   }
 
-  /**
-   * TODO(P0): Add implementation <done, but need check>
-   *
-   * @brief Insert key-value pair into the trie.
-   *
-   * If the key is an empty string, return false immediately.
-   *
-   * If the key already exists, return false. Duplicated keys are not allowed and
-   * you should never overwrite value of an existing key.
-   *
-   * When you reach the ending character of a key:
-   * 1. If TrieNode with this ending character does not exist, create new TrieNodeWithValue
-   * and add it to parent node's children_ map.
-   * 2. If the terminal node is a TrieNode, then convert it into TrieNodeWithValue by
-   * invoking the appropriate constructor.
-   * 3. If it is already a TrieNodeWithValue,
-   * then insertion fails and returns false. Do not overwrite existing data with new data.
-   *
-   * You can quickly check whether a TrieNode pointer holds TrieNode or TrieNodeWithValue
-   * by checking the is_end_ flag. If is_end_ == false, then it points to TrieNode. If
-   * is_end_ == true, it points to TrieNodeWithValue.
-   *
-   * @param key Key used to traverse the trie and find the correct node
-   * @param value Value to be inserted
-   * @return True if insertion succeeds, false if the key already exists
-   */
+ private:
   template <typename T>
-  bool Insert(const std::string &key, T value) {
+  bool InsertInternal(const std::string &key, T value) noexcept {
     if (key.empty()) {
       return false;
     }
-
     auto node = &root_;
     auto parent = &root_;
 
@@ -350,28 +325,46 @@ class Trie {
     // Not last key you are supposed to remove - it's the previous key.
     (*parent)->RemoveChildNode(last_key);
     (*parent)->InsertChildNode(last_key, std::move(q));
-
     return true;
   }
 
+ public:
   /**
    * TODO(P0): Add implementation <done, but need check>
    *
-   * @brief Remove key value pair from the trie.
-   * This function should also remove nodes that are no longer part of another
-   * key. If key is empty or not found, return false.
+   * @brief Insert key-value pair into the trie.
    *
-   * You should:
-   * 1) Find the terminal node for the given key.
-   * 2) If this terminal node does not have any children, remove it from its
-   * parent's children_ map.
-   * 3) Recursively remove nodes that have no children and are not terminal node
-   * of another key.
+   * If the key is an empty string, return false immediately.
+   *
+   * If the key already exists, return false. Duplicated keys are not allowed and
+   * you should never overwrite value of an existing key.
+   *
+   * When you reach the ending character of a key:
+   * 1. If TrieNode with this ending character does not exist, create new TrieNodeWithValue
+   * and add it to parent node's children_ map.
+   * 2. If the terminal node is a TrieNode, then convert it into TrieNodeWithValue by
+   * invoking the appropriate constructor.
+   * 3. If it is already a TrieNodeWithValue,
+   * then insertion fails and returns false. Do not overwrite existing data with new data.
+   *
+   * You can quickly check whether a TrieNode pointer holds TrieNode or TrieNodeWithValue
+   * by checking the is_end_ flag. If is_end_ == false, then it points to TrieNode. If
+   * is_end_ == true, it points to TrieNodeWithValue.
    *
    * @param key Key used to traverse the trie and find the correct node
-   * @return True if the key exists and is removed, false otherwise
+   * @param value Value to be inserted
+   * @return True if insertion succeeds, false if the key already exists
    */
-  bool Remove(const std::string &key) {
+  template <typename T>
+  bool Insert(const std::string &key, T value) {
+    this->latch_.WLock();  // context manager entered.
+    auto result = this->InsertInternal(key, value);
+    this->latch_.WUnlock();  // context manager ended.
+    return result;
+  }
+
+ private:
+  bool RemoveInternal(const std::string &key) {
     if (key.empty()) {
       return false;
     }
@@ -381,10 +374,10 @@ class Trie {
     // Track traversal chain. Use for recursive backtrack deletion.
     std::vector<std::pair<std::unique_ptr<TrieNode> *, char>> stack;
 
-    char last_key = 0;
     for (auto k : key) {
       stack.emplace_back(std::make_pair(node, k));
-      if (root_->HasChild(k)) {
+      // Note(P0): What a mistake - that I misused `root_` rather than `node`!
+      if ((*node)->HasChild(k)) {
         node = (*node)->GetChildNode(k);
         continue;
       }
@@ -393,7 +386,6 @@ class Trie {
     }
 
     assert(node != nullptr);
-    assert(last_key != 0);
 
     // Key not terminal node - early return.
     if (!(*node)->IsEndNode()) {
@@ -408,7 +400,8 @@ class Trie {
       auto [parent, k] = stack.back();
       stack.pop_back();
       auto child = (*parent)->GetChildNode(k);
-      auto new_child = std::make_unique<TrieNode>(TrieNode(std::move(**child)));
+      auto new_child = std::make_unique<TrieNode>(std::move(**child));
+      new_child->SetEndNode(false);
       (*parent)->RemoveChildNode(k);
       (*parent)->InsertChildNode(k, std::move(new_child));
     }
@@ -429,26 +422,34 @@ class Trie {
     return true;
   }
 
+ public:
   /**
    * TODO(P0): Add implementation <done, but need check>
    *
-   * @brief Get the corresponding value of type T given its key.
-   * If key is empty, set success to false.
-   * If key does not exist in trie, set success to false.
-   * If the given type T is not the same as the value type stored in TrieNodeWithValue
-   * (ie. GetValue<int> is called but terminal node holds std::string),
-   * set success to false.
+   * @brief Remove key value pair from the trie.
+   * This function should also remove nodes that are no longer part of another
+   * key. If key is empty or not found, return false.
    *
-   * To check whether the two types are the same, dynamic_cast
-   * the terminal TrieNode to TrieNodeWithValue<T>. If the casted result
-   * is not nullptr, then type T is the correct type.
+   * You should:
+   * 1) Find the terminal node for the given key.
+   * 2) If this terminal node does not have any children, remove it from its
+   * parent's children_ map.
+   * 3) Recursively remove nodes that have no children and are not terminal node
+   * of another key.
    *
    * @param key Key used to traverse the trie and find the correct node
-   * @param success Whether GetValue is successful or not
-   * @return Value of type T if type matches
+   * @return True if the key exists and is removed, false otherwise
    */
+  bool Remove(const std::string &key) {
+    this->latch_.WLock();  // context manager entered.
+    auto result = this->RemoveInternal(key);
+    this->latch_.WUnlock();  // context manager ended.
+    return result;
+  }
+
+ private:
   template <typename T>
-  T GetValue(const std::string &key, bool *success) {
+  T GetValueInternal(const std::string &key, bool *success) {
     *success = false;
     // Key empty
     if (key.empty()) {
@@ -473,13 +474,43 @@ class Trie {
 
     // Definitely can, since it is indeed a terminal node.
     auto p_maybe_node_with_value = dynamic_cast<TrieNodeWithValue<T> *>(node->get());
-    if (p_maybe_node_with_value != nullptr) {
-      return p_maybe_node_with_value->GetValue();
+    if (p_maybe_node_with_value == nullptr) {
+      throw std::runtime_error(
+          "Encountered TrieNode with IsEndNode() == true. "
+          "Is the dynamic_cast problematic, "
+          "or our setting has problem? ");
     }
-    throw std::runtime_error(
-        "Encountered TrieNode with IsEndNode() == true. "
-        "Is the dynamic_cast problematic, "
-        "or our setting has problem? ");
+    // Note(P0): What a mistake - that we forgot to assign the `success` value!
+    *success = true;
+    return p_maybe_node_with_value->GetValue();
+  }
+
+ public:
+  /**
+   * TODO(P0): Add implementation <done, but need check>
+   *
+   * @brief Get the corresponding value of type T given its key.
+   * If key is empty, set success to false.
+   * If key does not exist in trie, set success to false.
+   * If the given type T is not the same as the value type stored in TrieNodeWithValue
+   * (ie. GetValue<int> is called but terminal node holds std::string),
+   * set success to false.
+   *
+   * To check whether the two types are the same, dynamic_cast
+   * the terminal TrieNode to TrieNodeWithValue<T>. If the casted result
+   * is not nullptr, then type T is the correct type.
+   *
+   * @param key Key used to traverse the trie and find the correct node
+   * @param success Whether GetValue is successful or not
+   * @return Value of type T if type matches
+   */
+
+  template <typename T>
+  T GetValue(const std::string &key, bool *success) {
+    this->latch_.RLock();  // context manager entered.
+    auto result = this->GetValueInternal<T>(key, success);
+    this->latch_.RUnlock();  // context manager ended.
+    return result;
   }
 
   /**
@@ -488,4 +519,5 @@ class Trie {
    */
   [[nodiscard]] const std::unique_ptr<TrieNode> &GetRoot() const { return this->root_; }
 };
+
 }  // namespace bustub
